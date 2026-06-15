@@ -1,5 +1,9 @@
 # cachefence
 
+[![PyPI](https://img.shields.io/pypi/v/cachefence)](https://pypi.org/project/cachefence/)
+[![Python](https://img.shields.io/pypi/pyversions/cachefence)](https://pypi.org/project/cachefence/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+
 **Cache-aside for Redis without the stampede.**
 
 When a hot cache key expires, naive cache-aside lets *every* concurrent request
