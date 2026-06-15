@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cachefence"
+version = "0.1.0"
+description = "Cache-aside for Redis without the stampede. Probabilistic early refresh + distributed lock, so a hot key expiring never hammers your database."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Bourne" }]
+keywords = ["redis", "cache", "stampede", "thundering-herd", "xfetch", "async"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+dependencies = ["redis>=4.2"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio", "fakeredis"]
+dev = ["pytest", "pytest-asyncio", "fakeredis", "mypy", "ruff", "types-redis"]
+
+[project.urls]
+Homepage = "https://github.com/bourne44/cachefence"
+Issues = "https://github.com/bourne44/cachefence/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cachefence"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 90
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
