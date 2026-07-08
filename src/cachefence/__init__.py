@@ -27,6 +27,7 @@ Basic usage::
 
 from .cache import CacheFence
 from .errors import CacheFenceError, RecomputeError
+from .stats import CacheStats
 
-__all__ = ["CacheFence", "CacheFenceError", "RecomputeError"]
+__all__ = ["CacheFence", "CacheFenceError", "CacheStats", "RecomputeError"]
 __version__ = "0.1.0"

@@ -1,0 +1,48 @@
+name: release
+
+# Publishes to PyPI when a version tag is pushed:  git tag v0.1.0 && git push --tags
+#
+# One-time setup (no API token needed — this uses PyPI Trusted Publishing / OIDC):
+#   1. Create the project on PyPI (or reserve the name).
+#   2. PyPI project -> Settings -> Publishing -> add a GitHub trusted publisher:
+#        owner: bourne44   repo: cachefence
+#        workflow: release.yml   environment: pypi
+#   3. Create a GitHub environment named "pypi" on this repo.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Don't ship a release that doesn't pass the same gate as every commit.
+      - run: ruff check .
+      - run: mypy --strict src/cachefence/
+      - run: pytest -q
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # mint the OIDC token PyPI trusted publishing verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -11,11 +11,12 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import TypeVar, cast, overload
 
 from redis.asyncio import Redis
 
 from .errors import RecomputeError
+from .stats import CacheStats
 
 T = TypeVar("T")
 Recompute = Callable[[], "Awaitable[T] | T"]
@@ -58,7 +59,7 @@ class _Entry:
     expiry: float  # absolute unix time at which the value goes stale
 
 
-class CacheFence(Generic[T]):
+class CacheFence:
     """Cache-aside helper for Redis with built-in stampede protection.
 
     Parameters
@@ -79,11 +80,24 @@ class CacheFence(Generic[T]):
         Convert values to/from the ``bytes`` stored in Redis. Defaults to JSON.
     namespace:
         Optional prefix applied to every key.
+    serve_stale_on_error:
+        If ``True``, when a ``recompute`` fails during an early refresh while a
+        still-valid value is cached, return that value instead of raising. The
+        cache then acts as a shield during a backing-store outage. On a hard
+        miss there is no value to serve, so the error still propagates. Defaults
+        to ``False`` (fail closed).
+
+    The recompute return type flows through :meth:`get_or_set`, so a single
+    ``CacheFence`` can safely serve keys of different types::
+
+        user: dict = await cache.get_or_set("u:1", 60, load_user)   # -> dict
+        count: int = await cache.get_or_set("n", 60, lambda: 7)     # -> int
     """
 
     __slots__ = (
         "_redis", "_beta", "_lock_timeout", "_wait_for_lock",
         "_dumps", "_loads", "_ns", "_release", "_lua_ok",
+        "_serve_stale", "_stats",
     )
 
     def __init__(
@@ -96,6 +110,7 @@ class CacheFence(Generic[T]):
         serializer: Serializer = _default_serializer,
         deserializer: Deserializer = _default_deserializer,
         namespace: str = "",
+        serve_stale_on_error: bool = False,
     ) -> None:
         self._redis = redis
         self._beta = beta
@@ -104,8 +119,15 @@ class CacheFence(Generic[T]):
         self._dumps = serializer
         self._loads = deserializer
         self._ns = namespace
+        self._serve_stale = serve_stale_on_error
         self._release = redis.register_script(_RELEASE_LOCK)
         self._lua_ok = True  # flips to False if the server rejects scripting
+        self._stats = CacheStats()
+
+    @property
+    def stats(self) -> CacheStats:
+        """Live counters (hits, misses, stampedes prevented, ...)."""
+        return self._stats
 
     def _key(self, key: str) -> str:
         return f"{self._ns}{key}" if self._ns else key
@@ -113,6 +135,29 @@ class CacheFence(Generic[T]):
     @staticmethod
     def _lock_key(rkey: str) -> str:
         return f"{rkey}:lock"
+
+    # Two overloads so the return type flows for both async and sync recompute
+    # callables. The async form is listed first: a coroutine function matches
+    # ``Callable[[], Awaitable[T]]`` and binds T to the awaited type, whereas a
+    # plain ``Callable[[], T]`` would otherwise bind T to the coroutine itself.
+    @overload
+    async def get_or_set(
+        self,
+        key: str,
+        ttl: float,
+        recompute: Callable[[], Awaitable[T]],
+        *,
+        beta: float | None = None,
+    ) -> T: ...
+    @overload
+    async def get_or_set(
+        self,
+        key: str,
+        ttl: float,
+        recompute: Callable[[], T],
+        *,
+        beta: float | None = None,
+    ) -> T: ...
 
     async def get_or_set(
         self,
@@ -124,10 +169,10 @@ class CacheFence(Generic[T]):
     ) -> T:
         """Return the cached value for ``key``, recomputing it if needed.
 
-        ``recompute`` may be sync or async. ``ttl`` is the fresh lifetime in
-        seconds. At most one worker recomputes at a time; the rest serve the
-        still-valid cached value or wait briefly, never stampeding the backing
-        store.
+        ``recompute`` may be sync or async, and its return type is the return
+        type of this call. ``ttl`` is the fresh lifetime in seconds. At most one
+        worker recomputes at a time; the rest serve the still-valid cached value
+        or wait briefly, never stampeding the backing store.
         """
         rkey = self._key(key)
         beta = self._beta if beta is None else beta
@@ -135,14 +180,26 @@ class CacheFence(Generic[T]):
         entry = await self._read(rkey)
         if entry is not None:
             if not self._should_refresh_early(entry, beta):
+                self._stats.hits += 1
                 return cast(T, entry.value)
             # Near expiry: one worker wins the lock and refreshes ahead of time
             # while everyone else keeps serving the value that is still valid.
             token = await self._acquire(rkey)
             if token is None:
+                self._stats.hits += 1
+                self._stats.stampedes_prevented += 1
                 return cast(T, entry.value)
             try:
-                return await self._recompute_and_store(rkey, ttl, recompute)
+                value = await self._recompute_and_store(rkey, ttl, recompute)
+            except RecomputeError:
+                if self._serve_stale:
+                    # The backing store failed, but the cached value is still
+                    # valid. Shield the request instead of failing it.
+                    return cast(T, entry.value)
+                raise
+            else:
+                self._stats.early_refreshes += 1
+                return value
             finally:
                 await self._release_lock(rkey, token)
 
@@ -171,7 +228,7 @@ class CacheFence(Generic[T]):
         # distributed; scaling it by delta*beta makes expensive-to-rebuild keys
         # refresh earlier, spreading recomputes out instead of bunching them at
         # expiry. The gap widens as we approach expiry, so the trigger probability
-        # rises smoothly toward 1.
+        # rises smoothly toward 1. beta=0 disables early refresh entirely.
         gap = entry.delta * beta * -math.log(random.random() or 1e-12)
         return time.time() + gap >= entry.expiry
 
@@ -223,6 +280,7 @@ class CacheFence(Generic[T]):
         self, rkey: str, ttl: float, recompute: Recompute[T]
     ) -> T:
         start = time.monotonic()
+        self._stats.recomputes += 1
         try:
             result = recompute()
             if inspect.isawaitable(result):
@@ -230,6 +288,7 @@ class CacheFence(Generic[T]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._stats.recompute_errors += 1
             raise RecomputeError(str(exc)) from exc
 
         value = cast(T, result)
@@ -247,6 +306,7 @@ class CacheFence(Generic[T]):
     async def _rebuild_on_miss(
         self, rkey: str, ttl: float, recompute: Recompute[T]
     ) -> T:
+        self._stats.misses += 1
         token = await self._acquire(rkey)
         if token is not None:
             try:
@@ -262,6 +322,7 @@ class CacheFence(Generic[T]):
             await asyncio.sleep(delay)
             entry = await self._read(rkey)
             if entry is not None:
+                self._stats.stampedes_prevented += 1
                 return cast(T, entry.value)
             delay = min(delay * 1.5, 0.2)
 

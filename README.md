@@ -1,5 +1,6 @@
 # cachefence
 
+[![CI](https://github.com/bourne44/cachefence/actions/workflows/tests.yml/badge.svg)](https://github.com/bourne44/cachefence/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/cachefence)](https://pypi.org/project/cachefence/)
 [![Python](https://img.shields.io/pypi/pyversions/cachefence)](https://pypi.org/project/cachefence/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
@@ -21,6 +22,14 @@ with cachefence        DB hits:    1
 ```
 
 Same workload, one extra import: **500 database queries become 1.**
+
+## When you need this
+
+If only a handful of requests ever share a key, plain cache-aside is fine — you
+don't need this. cachefence earns its keep when *many* requests hit the *same*
+key at the *same* moment and rebuilding it is expensive (a slow query, an
+upstream call). That's exactly when the naive pattern turns one expired key into
+a pile of identical database queries.
 
 ## Install
 
@@ -55,6 +64,10 @@ changes:
 await cache.invalidate(f"user:{user_id}")
 ```
 
+cachefence is fully typed: the value type flows from `recompute`, so
+`get_or_set(key, ttl, load_user)` is inferred as whatever `load_user` returns —
+no casts, no `Any`.
+
 ## How it works
 
 cachefence layers two mechanisms so a key almost never goes cold *and* a cold key
@@ -81,10 +94,11 @@ a lock it no longer owns.
 ```python
 cache = CacheFence(
     redis,
-    beta=1.0,          # XFetch aggressiveness; higher = refresh earlier
-    lock_timeout=10.0, # seconds before a rebuild lock auto-expires
-    wait_for_lock=5.0, # max seconds a waiter blocks before rebuilding itself
-    namespace="app:",  # optional key prefix
+    beta=1.0,                    # XFetch aggressiveness; higher = refresh earlier
+    lock_timeout=10.0,           # seconds before a rebuild lock auto-expires
+    wait_for_lock=5.0,           # max seconds a waiter blocks before rebuilding itself
+    namespace="app:",            # optional key prefix
+    serve_stale_on_error=False,  # serve the valid cached value if a refresh fails
 )
 ```
 
@@ -95,6 +109,29 @@ import pickle
 cache = CacheFence(redis, serializer=pickle.dumps, deserializer=pickle.loads)
 # serializer returns bytes, deserializer takes bytes
 ```
+
+## Observability
+
+Every cache tracks what it's doing. Read `cache.stats` to watch the mechanisms
+work — especially `stampedes_prevented`, the count of database queries you
+*didn't* make:
+
+```python
+await asyncio.gather(*(get_user(1) for _ in range(500)))
+
+print(cache.stats)
+# CacheStats(hits=0, misses=500, early_refreshes=0, recomputes=1,
+#            recompute_errors=0, stampedes_prevented=499)
+print(cache.stats.hit_rate)  # 0.0 cold; climbs as the key stays warm
+```
+
+## Resilience
+
+By default a failed `recompute` raises `RecomputeError`. Pass
+`serve_stale_on_error=True` and, when a refresh fails while a still-valid value
+is cached, cachefence returns that value instead — so a blip in your backing
+store doesn't become an error for every request. On a hard miss there is nothing
+valid to serve, so the error still propagates.
 
 ## A note on connection pools
 
@@ -121,12 +158,18 @@ python examples/stampede_demo.py
 ## Development
 
 ```bash
-pip install -e ".[test]"
+pip install -e ".[dev]"
+ruff check .
+mypy --strict src/cachefence/
 pytest
 ```
 
-The test suite includes a 100-way concurrent-miss test asserting the recompute
-runs exactly once — the core guarantee of the library.
+The suite proves each guarantee in isolation: a 100-way concurrent-miss test
+(recompute runs exactly once), single-flight XFetch early refresh, the
+compare-and-delete lock and its `WATCH`/`MULTI` fallback, the crashed-holder
+timeout path, custom serialization, and the observability counters.
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
