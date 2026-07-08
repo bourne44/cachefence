@@ -25,7 +25,7 @@ Same workload, one extra import: **500 database queries become 1.**
 
 ## When you need this
 
-If only a handful of requests ever share a key, plain cache-aside is fine — you
+If only a handful of requests ever share a key, plain cache-aside is fine. You
 don't need this. cachefence earns its keep when *many* requests hit the *same*
 key at the *same* moment and rebuilding it is expensive (a slow query, an
 upstream call). That's exactly when the naive pattern turns one expired key into
@@ -65,8 +65,8 @@ await cache.invalidate(f"user:{user_id}")
 ```
 
 cachefence is fully typed: the value type flows from `recompute`, so
-`get_or_set(key, ttl, load_user)` is inferred as whatever `load_user` returns —
-no casts, no `Any`.
+`get_or_set(key, ttl, load_user)` is inferred as whatever `load_user` returns.
+No casts, no `Any`.
 
 ## How it works
 
@@ -113,8 +113,8 @@ cache = CacheFence(redis, serializer=pickle.dumps, deserializer=pickle.loads)
 ## Observability
 
 Every cache tracks what it's doing. Read `cache.stats` to watch the mechanisms
-work — especially `stampedes_prevented`, the count of database queries you
-*didn't* make:
+work. Especially `stampedes_prevented`: the count of database queries you
+*didn't* make.
 
 ```python
 await asyncio.gather(*(get_user(1) for _ in range(500)))
@@ -129,8 +129,8 @@ print(cache.stats.hit_rate)  # 0.0 cold; climbs as the key stays warm
 
 By default a failed `recompute` raises `RecomputeError`. Pass
 `serve_stale_on_error=True` and, when a refresh fails while a still-valid value
-is cached, cachefence returns that value instead — so a blip in your backing
-store doesn't become an error for every request. On a hard miss there is nothing
+is cached, cachefence returns that value instead. A blip in your backing store
+doesn't become an error for every request. On a hard miss there is nothing
 valid to serve, so the error still propagates.
 
 ## A note on connection pools
